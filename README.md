@@ -110,6 +110,7 @@ Phi), depend on `MLXFoundationModels` and pass an `MLXLanguageModel` to
 
 ```swift
 import MLXFoundationModels
+import MLXLLM
 import MLXHuggingFace
 import MLXLMCommon
 import HuggingFace

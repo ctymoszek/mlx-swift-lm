@@ -11,6 +11,7 @@ Llama, Gemma, Phi, etc.) with a one-line constructor change.
 
 ```swift
 import MLXFoundationModels
+import MLXLLM
 import MLXHuggingFace
 import MLXLMCommon
 import HuggingFace

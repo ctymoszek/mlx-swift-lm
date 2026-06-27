@@ -57,6 +57,7 @@ For Hugging Face Hub-backed weights, use the `#huggingFaceLanguageModel` macro:
 
 ```swift
 import MLXFoundationModels
+import MLXLLM
 import MLXHuggingFace
 import MLXLMCommon
 import HuggingFace

@@ -303,23 +303,17 @@
         /// Example usage:
         /// ```swift
         /// import MLXFoundationModels
-        /// import MLXLMHFAPI      // HubClient (Downloader)
-        /// import MLXLMTokenizers // TokenizersLoader
+        /// import MLXLLM        // LLMRegistry and the model factory
+        /// import MLXHuggingFace
+        /// import MLXLMCommon
+        /// import HuggingFace
+        /// import Tokenizers
+        /// import Hub
+        /// import FoundationModels
         ///
-        /// let cache = HubCache.default
-        /// let repoID = Repo.ID(rawValue: "mlx-community/Qwen2.5-3B-Instruct-4bit")!
-        /// let model = MLXLanguageModel(
-        ///     modelID: repoID.rawValue,
-        ///     capabilities: LanguageModelCapabilities(
-        ///         capabilities: [.guidedGeneration, .toolCalling]),
-        ///     from: HubClient.default,
-        ///     using: TokenizersLoader(),
-        ///     locatedBy: { id in
-        ///         guard let r = Repo.ID(rawValue: id) else { return URL(fileURLWithPath: "/") }
-        ///         return cache.snapshotPath(repo: r, kind: .model, revision: "main")
-        ///             ?? cache.repoDirectory(repo: r, kind: .model)
-        ///     }
-        /// )
+        /// let model = #huggingFaceLanguageModel(
+        ///     configuration: LLMRegistry.gemma3_1B_qat_4bit,
+        ///     capabilities: [.guidedGeneration, .toolCalling])
         /// let session = LanguageModelSession(model: model, tools: [], instructions: nil)
         /// let response = try await session.respond(to: "Hello!")
         /// print(response.content)
