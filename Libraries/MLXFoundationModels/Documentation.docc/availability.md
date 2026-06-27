@@ -52,21 +52,20 @@ public init(
 )
 ```
 
-For Hugging Face Hub-backed weights, `MLXHuggingFace` exports a free
-function you can pass directly:
+For Hugging Face Hub-backed weights, use the `#huggingFaceLanguageModel` macro:
 
 ```swift
+import MLXFoundationModels
 import MLXHuggingFace
+import MLXLMCommon
+import HuggingFace
+import Tokenizers
 import Hub
+import FoundationModels
 
-let model = MLXLanguageModel(
-    modelID: "mlx-community/Qwen3-4B-4bit",
-    capabilities: LanguageModelCapabilities(
-        capabilities: [.guidedGeneration, .toolCalling]),
-    from: #hubDownloader(),
-    using: #huggingFaceTokenizerLoader(),
-    locatedBy: { id in HubApi.shared.localRepoLocation(HubApi.Repo(id: id)) }
-)
+let model = #huggingFaceLanguageModel(
+    configuration: LLMRegistry.gemma3_1B_qat_4bit,
+    capabilities: [.guidedGeneration, .toolCalling])
 ```
 
 For a private CDN, custom on-disk layout, or shared cache:

@@ -111,17 +111,15 @@ Phi), depend on `MLXFoundationModels` and pass an `MLXLanguageModel` to
 ```swift
 import MLXFoundationModels
 import MLXHuggingFace
-import FoundationModels
+import MLXLMCommon
+import HuggingFace
+import Tokenizers
 import Hub
+import FoundationModels
 
-let model = MLXLanguageModel(
-    modelID: "mlx-community/Qwen3-4B-4bit",
-    capabilities: LanguageModelCapabilities(
-        capabilities: [.guidedGeneration, .toolCalling]),
-    from: #hubDownloader(),
-    using: #huggingFaceTokenizerLoader(),
-    locatedBy: { id in HubApi.shared.localRepoLocation(HubApi.Repo(id: id)) }
-)
+let model = #huggingFaceLanguageModel(
+    configuration: LLMRegistry.gemma3_1B_qat_4bit,
+    capabilities: [.guidedGeneration, .toolCalling])
 let session = LanguageModelSession(model: model)
 print(try await session.respond(to: "Explain MLX in one sentence."))
 ```
