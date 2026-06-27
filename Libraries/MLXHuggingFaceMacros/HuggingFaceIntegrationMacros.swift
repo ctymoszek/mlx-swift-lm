@@ -11,6 +11,7 @@ struct Macros: CompilerPlugin {
         TokenizerLoaderMacro.self,
         LoadContainerMacro.self,
         LoadContextMacro.self,
+        HuggingFaceLanguageModelMacro.self,
     ]
 }
 
@@ -210,6 +211,46 @@ public struct LoadContextMacro: ExpressionMacro {
                 using: #huggingFaceTokenizerLoader(),
                 configuration: \(configuration),
                 progressHandler: \(raw: progress))
+            """
+    }
+}
+
+public struct HuggingFaceLanguageModelMacro: ExpressionMacro {
+    public static func expansion(
+        of node: some FreestandingMacroExpansionSyntax,
+        in context: some MacroExpansionContext
+    ) throws -> ExprSyntax {
+        guard
+            let configuration = node.arguments.first(where: { $0.label?.text == "configuration" })?
+                .expression
+        else {
+            throw MacroExpansionError.message("#huggingFaceLanguageModel requires a configuration")
+        }
+
+        // Forward the optional arguments only when written, so the initializer's
+        // own defaults apply otherwise.
+        var forwarded = "configuration: \(configuration),\n"
+        if let caps = node.arguments.first(where: { $0.label?.text == "capabilities" })?.expression
+        {
+            forwarded += "capabilities: \(caps),\n"
+        }
+        if let resolver = node.arguments.first(where: { $0.label?.text == "configurationResolver" }
+        )?
+        .expression {
+            forwarded += "configurationResolver: \(resolver),\n"
+        }
+
+        return
+            """
+            MLXLanguageModel(
+                \(raw: forwarded)weightsLocation: { id in HubApi.shared.localRepoLocation(HubApi.Repo(id: id)) },
+                load: { configuration, progressHandler in
+                    try await loadModelContainer(
+                        from: #hubDownloader(),
+                        using: #huggingFaceTokenizerLoader(),
+                        configuration: configuration,
+                        progressHandler: progressHandler)
+                })
             """
     }
 }

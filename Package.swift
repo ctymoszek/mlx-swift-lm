@@ -238,6 +238,7 @@ let package = Package(
             name: "MLXFoundationModels",
             dependencies: [
                 "MLXLMCommon",
+                "MLXHuggingFaceMacros",
                 .target(
                     name: "MLXGuidedGeneration",
                     condition: .when(traits: ["FoundationModelsIntegration"])
