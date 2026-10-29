@@ -690,8 +690,10 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 schemaJSON = nil
             }
 
-            // Guided generation shows the model the schema, including its @Guide
-            // descriptions, not just the grammar. Tool-aware prompts are unchanged.
+            // Guided generation adds the schema, including its @Guide descriptions,
+            // to the system prompt, so the model sees more than the grammar.
+            // `includeSchemaInPrompt` refers to the system prompt. Tool-aware
+            // prompts are unchanged.
             let promptMessages = TranscriptConverter.promptMessages(
                 collected, schemaJSON: schemaJSON,
                 includeSchemaInPrompt: request.contextOptions.includeSchemaInPrompt)

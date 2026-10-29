@@ -206,7 +206,7 @@ struct TranscriptConverter {
         let entry: Transcript.Entry
     }
 
-    /// The schema JSON to inline into the prompt: nil only when `includeSchemaInPrompt` is `false`.
+    /// The schema JSON to add to the system prompt: nil only when `includeSchemaInPrompt` is `false`.
     static func schemaJSONForPrompt(_ schemaJSON: String?, includeSchemaInPrompt: Bool?) -> String?
     {
         includeSchemaInPrompt == false ? nil : schemaJSON
