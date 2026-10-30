@@ -1,5 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
+import MLX
+
 /// Controls whether the generation loop continues.
 public enum TokenLoopDisposition: Sendable {
     /// Continue generating tokens.
@@ -66,18 +68,19 @@ extension TokenLoopHandler {
 public struct TextToolTokenLoopHandler: TokenLoopHandler {
     public typealias Output = Generation
 
-    private static let logger = Logger(
-        subsystem: "mlx-swift-lm", category: "TokenStreamProtocol")
+    private static let logger = MLXLogger(label: "TokenStreamProtocol")
     private var decoder: any TokenStreamDecoder
+    var cachedPromptTokenCount = 0
 
     public init(
         tokenizer: Tokenizer, stopStrings: Set<String> = [], format: ToolCallFormat,
         tools: [[String: any Sendable]]? = nil,
-        toolCallPolicy: ToolCallPolicy = .init()
+        toolCallPolicy: ToolCallPolicy = .init(),
+        reasoning: (config: ReasoningConfig, primedInside: Bool)? = nil
     ) {
         self.decoder = format.makeTokenStreamDecoder(
             tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
-            toolCallPolicy: toolCallPolicy)
+            toolCallPolicy: toolCallPolicy, reasoning: reasoning)
     }
 
     public var additionalStopTokenIDs: Set<Int> { decoder.additionalStopTokenIDs }
@@ -117,7 +120,8 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
         .info(
             info.withToolCallCounts(
                 rejected: decoder.rejectedToolCallCount,
-                recovered: decoder.recoveredToolCallCount))
+                recovered: decoder.recoveredToolCallCount)
+        ).attributingCachedPromptTokens(cachedPromptTokenCount)
     }
 
     private mutating func process(
@@ -143,10 +147,10 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
         emit: (sending Generation) -> Bool
     ) -> TokenLoopDisposition {
         switch event {
-        case .reasoning:
-            // The public Generation stream intentionally exposes only response
-            // text and tool calls. Protocol-aware clients consume reasoning via
-            // the package-level TokenStreamDecoder contract.
+        case .reasoning(let reasoning):
+            if !emit(.reasoning(reasoning)) {
+                return .cancelled
+            }
             return .more
 
         case .response(let response):

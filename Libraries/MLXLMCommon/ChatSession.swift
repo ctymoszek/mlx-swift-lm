@@ -200,21 +200,17 @@ public final class ChatSession {
                 uncommittedTokens.removeAll()
             }
 
+            // A turn that produced only reasoning appends an empty assistant message.
+            // That is deliberate: it keeps user/assistant alternation for strict
+            // templates and keeps the user's turn in the transcript.
             var message = Chat.Message.assistant(
                 assistant.content,
                 toolCalls: assistant.toolCalls.isEmpty ? nil : assistant.toolCalls)
             message.prefilledReasoningStartDelimiter = assistant.prefilledReasoningStartDelimiter
+            message.reasoning =
+                assistant.finishedReasoning.isEmpty ? nil : assistant.finishedReasoning
             messages.append(message)
             return true
-        }
-    }
-
-    private struct GenerationRun {
-        let stream: AsyncStream<Generation>
-        let task: Task<[Int], Never>
-
-        init(_ pair: (AsyncStream<Generation>, Task<[Int], Never>)) {
-            (stream, task) = pair
         }
     }
 
@@ -226,16 +222,39 @@ public final class ChatSession {
         var stopReason: GenerateStopReason?
         var wasTerminatedByConsumer = false
 
+        /// Whether any `.reasoning` arrived.
+        ///
+        /// Reasoning stays out of ``content``. It is tracked so a turn that produced
+        /// only thinking, such as one that hit `maxTokens` mid-thought, is not mistaken
+        /// for an empty generation and rolled back along with the user's message.
+        var producedReasoning = false
+
+        /// Reasoning the model finished: an answer or a tool call followed it.
+        /// Recorded beside the message for templates that replay it.
+        var finishedReasoning = ""
+
+        /// Reasoning with nothing after it yet. A turn that ends here was cut off
+        /// mid-thought, and replaying it would present the thought as complete.
+        var openReasoning = ""
+
         var shouldRecord: Bool {
-            (!content.isEmpty || !toolCalls.isEmpty)
+            (!content.isEmpty || !toolCalls.isEmpty || producedReasoning)
                 && rejectedToolCalls.isEmpty
                 && !wasTerminatedByConsumer
                 && stopReason != .cancelled
         }
 
         mutating func consume(_ item: Generation) {
+            if item.chunk != nil || item.toolCall != nil {
+                finishedReasoning += openReasoning
+                openReasoning = ""
+            }
             if let chunk = item.chunk {
                 content += chunk
+            }
+            if let reasoning = item.reasoning {
+                producedReasoning = true
+                openReasoning += reasoning
             }
             if let toolCall = item.toolCall {
                 toolCalls.append(toolCall)
@@ -246,24 +265,6 @@ public final class ChatSession {
             if let info = item.info {
                 stopReason = info.stopReason
             }
-        }
-    }
-
-    private static func prefilledReasoningStartDelimiter(
-        in promptTokens: [Int], config: ReasoningConfig?, tokenizer: any Tokenizer
-    ) -> String? {
-        guard let delimiter = config?.startDelimiter, !delimiter.isEmpty else { return nil }
-
-        // Decode a tail, expanding when trailing whitespace could hide the delimiter.
-        var count = min(64, promptTokens.count)
-        while true {
-            let tail = tokenizer.decode(
-                tokenIds: Array(promptTokens.suffix(count)), skipSpecialTokens: false
-            ).trimmingCharacters(in: .whitespacesAndNewlines)
-            if tail.count >= delimiter.count || count == promptTokens.count {
-                return tail.hasSuffix(delimiter) ? delimiter : nil
-            }
-            count = min(promptTokens.count, count * 2)
         }
     }
 
@@ -940,6 +941,55 @@ public final class ChatSession {
         }
     }
 
+    /// Errors from a generation observation request.
+    public enum ObservationError: LocalizedError {
+        /// The selected speculative iterator cannot report token log probabilities.
+        case unsupportedSpeculativeDecoding
+
+        public var errorDescription: String? {
+            switch self {
+            case .unsupportedSpeculativeDecoding:
+                "Token log probabilities are unavailable with active speculative decoding. Use standard decoding for observation."
+            }
+        }
+    }
+
+    /// Stream details through a fresh composed handler for each generation pass.
+    ///
+    /// The transformer configures a copy of the session's parameters for this
+    /// request, including automatic tool restarts. Its output must forward all
+    /// base generation events so the session can maintain its transcript and cache.
+    /// Log-probability reporting with active speculative decoding throws
+    /// ``ObservationError/unsupportedSpeculativeDecoding``.
+    public func observe<T: GenerationTransformer>(
+        to prompt: String,
+        role: Chat.Message.Role = .user,
+        images: consuming [UserInput.Image] = [],
+        videos: consuming [UserInput.Video] = [],
+        audios: consuming [UserInput.Audio] = [],
+        using transformer: T
+    ) -> AsyncThrowingStream<T.Handler.Output, Error> {
+        streamMap(
+            messages: [
+                .init(role: role, content: prompt, images: images, videos: videos, audios: audios)
+            ],
+            transformer: transformer, requiresLogProbabilitySupport: true
+        ) { $0 }
+    }
+
+    /// Stream transformed details after appending structured messages.
+    ///
+    /// The transformer applies only to this request. The session retains its
+    /// transcript and KV cache, including across automatic tool restarts.
+    public func observe<T: GenerationTransformer>(
+        to messages: consuming [Chat.Message],
+        using transformer: T
+    ) -> AsyncThrowingStream<T.Handler.Output, Error> {
+        streamMap(
+            messages: messages, transformer: transformer, requiresLogProbabilitySupport: true
+        ) { $0 }
+    }
+
     /// Produces a streaming response to a prompt by transforming the
     /// raw `Generation` values.
     ///
@@ -972,17 +1022,33 @@ public final class ChatSession {
         failOnRejectedToolCall: Bool = false,
         transform: @Sendable @escaping (Generation) -> R?
     ) -> AsyncThrowingStream<R, Error> {
+        streamMap(
+            messages: messages, failOnRejectedToolCall: failOnRejectedToolCall,
+            transformer: TextGenerationTransformer(), transform: transform)
+    }
+
+    private func streamMap<T: GenerationTransformer, R: Sendable>(
+        messages: consuming [Chat.Message],
+        failOnRejectedToolCall: Bool = false,
+        transformer: T,
+        requiresLogProbabilitySupport: Bool = false,
+        transform: @Sendable @escaping (T.Handler.Output) -> R?
+    ) -> AsyncThrowingStream<R, Error> {
         let (stream, continuation) = AsyncThrowingStream<R, Error>.makeStream()
 
         // images and videos are not Sendable (MLXArray) but they are consumed
         // and are only being sent to the inner async
         let inputMessages = SendableBox<[Chat.Message]>(messages)
 
+        var parameters = generateParameters
+        transformer.configure(&parameters)
+
         let task = Task {
             [
                 model,
                 instructions, processing, tools, toolDispatch,
-                additionalContext, cache, loadedDraftModel, generateParameters, components,
+                additionalContext, cache, loadedDraftModel, generateParameters = parameters,
+                components,
                 speculativeDecoding
             ] in
             do {
@@ -1131,6 +1197,11 @@ public final class ChatSession {
                             pendingOnDemandComponents(
                                 of: model, among: ModelComponent.needed(by: preparedInput)))
                         var input = preparedInput
+                        // The whole prompt, not `input`: the cache may leave less than the
+                        // prefill to prefill. Read before the prefill is queued.
+                        let reasoningPrimedInside = promptPrimesReasoning(
+                            input: preparedInput, modelConfiguration: modelConfiguration,
+                            tokenizer: tokenizer)
                         var prefilledReasoningStartDelimiter: String?
                         pendingMessages.removeAll()
 
@@ -1163,10 +1234,10 @@ public final class ChatSession {
                             || preparedInput.audio != nil
                         if var currentConversation = conversation {
                             let promptTokenIds = preparedInput.text.tokens.asArray(Int.self)
-                            prefilledReasoningStartDelimiter =
-                                ChatSession.prefilledReasoningStartDelimiter(
-                                    in: promptTokenIds, config: modelConfiguration.reasoningConfig,
-                                    tokenizer: tokenizer)
+                            if reasoningPrimedInside {
+                                prefilledReasoningStartDelimiter =
+                                    modelConfiguration.reasoningConfig?.startDelimiter
+                            }
                             let cachedTokenIds = currentConversation.cachedTokens
                             assert(
                                 kvCache.nativeAttentionOffsetsAreAligned,
@@ -1327,7 +1398,31 @@ public final class ChatSession {
                         }
 
                         // Select the token iterator based on speculative decoding configuration.
+                        typealias GenerationRun = (
+                            events: AsyncStream<T.Handler.Output>, task: Task<[Int], Never>
+                        )
                         let generation: GenerationRun
+                        func startGeneration(_ iterator: consuming any TokenIteratorProtocol)
+                            -> GenerationRun
+                        {
+                            var base = TextToolTokenLoopHandler(
+                                tokenizer: tokenizer,
+                                stopStrings: modelConfiguration.effectiveStopStrings,
+                                format: modelConfiguration.toolCallFormat ?? .json,
+                                tools: toolValidationSchemas,
+                                toolCallPolicy: generateParameters.toolCallPolicy,
+                                reasoning: modelConfiguration.reasoningConfig.map {
+                                    (config: $0, primedInside: reasoningPrimedInside)
+                                })
+                            base.cachedPromptTokenCount = cachedPromptTokenCount
+                            return MLXLMCommon.generateTaskRecordingTokens(
+                                promptTokenCount: input.text.tokens.size,
+                                modelConfiguration: modelConfiguration,
+                                tokenizer: tokenizer,
+                                iterator: iterator,
+                                handler: transformer.makeHandler(wrapping: base))
+                        }
+
                         func defaultGeneration() throws -> GenerationRun {
                             // Seed the carried state and read back the post-prefill state so the
                             // next turn, or the next tool restart, anchors correctly.
@@ -1337,15 +1432,7 @@ public final class ChatSession {
                                 parameters: generateParameters, components: components)
                             lmState = iterator.state
 
-                            return GenerationRun(
-                                MLXLMCommon.generateTaskRecordingTokens(
-                                    promptTokenCount: input.text.tokens.size,
-                                    modelConfiguration: modelConfiguration,
-                                    tokenizer: tokenizer,
-                                    iterator: iterator,
-                                    tools: toolValidationSchemas,
-                                    toolCallPolicy: generateParameters.toolCallPolicy)
-                            )
+                            return startGeneration(iterator)
                         }
 
                         // Carried model state is safe to speculate on: the anchors position from
@@ -1410,6 +1497,12 @@ public final class ChatSession {
 
                                     generation = try defaultGeneration()
                                 } else {
+                                    if requiresLogProbabilitySupport,
+                                        generateParameters.logProbabilities != nil
+                                    {
+                                        throw ObservationError.unsupportedSpeculativeDecoding
+                                    }
+
                                     if cachedDraftContainer == nil {
                                         await loadedDraftModel.update { storedDraftModel in
                                             if storedDraftModel == nil {
@@ -1461,14 +1554,7 @@ public final class ChatSession {
                                     // so the next turn keeps its anchor.
                                     lmState = iterator.state
 
-                                    generation = GenerationRun(
-                                        MLXLMCommon.generateTaskRecordingTokens(
-                                            promptTokenCount: input.text.tokens.size,
-                                            modelConfiguration: modelConfiguration,
-                                            tokenizer: tokenizer,
-                                            iterator: iterator,
-                                            tools: toolValidationSchemas,
-                                            toolCallPolicy: generateParameters.toolCallPolicy))
+                                    generation = startGeneration(iterator)
                                 }
                             }
                         } else {
@@ -1480,22 +1566,25 @@ public final class ChatSession {
                         var assistant = AssistantGeneration(
                             prefilledReasoningStartDelimiter: prefilledReasoningStartDelimiter)
 
-                        for await item in generation.stream {
-                            let item = item.attributingCachedPromptTokens(cachedPromptTokenCount)
-                            assistant.consume(item)
+                        func emit(_ value: R) -> Bool {
+                            if case .terminated = continuation.yield(value) {
+                                assistant.wasTerminatedByConsumer = true
+                                generation.task.cancel()
+                                return false
+                            }
+                            return true
+                        }
 
-                            // collect tool calls for dispatch; if no
-                            // toolDispatch the caller handles them via
-                            // the transform (streamDetails path)
-                            if let toolCall = item.toolCall, toolDispatch != nil {
-                                pendingToolCalls.append(toolCall)
-                            } else if let value = transform(item) {
-                                if case .terminated = continuation.yield(value) {
-                                    assistant.wasTerminatedByConsumer = true
-                                    generation.task.cancel()
-                                    break
+                        for await event in generation.events {
+                            if let item = event.generation {
+                                assistant.consume(item)
+
+                                if let toolCall = item.toolCall, toolDispatch != nil {
+                                    pendingToolCalls.append(toolCall)
+                                    continue
                                 }
                             }
+                            if let value = transform(event), !emit(value) { break }
                         }
 
                         // The generation task is unstructured, so cancellation of
